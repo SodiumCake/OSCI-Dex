@@ -19,8 +19,8 @@ from interactions.models.internal.localisation import LocalisedField
 from objects import OBJECTS
 import json
 
-DATA_PATH = "data/collections.json"
-CHANNELS_PATH = "data/channels.json"
+DATA_PATH = "collections.json"
+CHANNELS_PATH = "channels.json"
 
 
 # ===================== CLIENT =====================
