@@ -1,13 +1,13 @@
 OBJECTS = [
   {"name": "Sodium", "rarity": 50, "color": 0xFFD700, "image": "https://imgur.com/wvyymCl.png"},
-  {"name": "Funhouse", "rarity": 43.0, "color": 0x51515e, "image": "https://imgur.com/iHrwB9B.png"},
-  {"name": "Nasi Papan", "rarity": 30, "color": 0x90EE90, "image": "https://imgur.com/ql5J6bR.png"},
+  {"name": "Kertas amplas hitam", "rarity": 43.0, "color": 0x51515e, "image": "https://imgur.com/iHrwB9B.png"},
+  {"name": "Breadnote", "rarity": 30, "color": 0x90EE90, "image": "https://imgur.com/ql5J6bR.png"},
       {"name": "Orygamy", "rarity": 22.2, "color": 0xFF69B4, "image": "https://imgur.com/gcHHGsI.png"},
   {"name": "Progressbar 95", "rarity": 24, "color": 0xFF69B4, "image": "https://imgur.com/oRapg32.png"},
   {"name": "Kelapa Sawit", "rarity": 33.3, "color": 0x57ab7b, "image": "https://imgur.com/w1vcNBQ.png"},
   {"name": "Canti", "rarity": 43.8, "color": 0xeb344f, "image": "https://i.imgur.com/RTvDPXd.png"},
   {"name": "Testy", "rarity": 24.9, "color": 0x66f224, "image": "https://i.imgur.com/qRft5l0.png"},
-  {"name": "KajuSukaKeju", "rarity": 38.8, "color": 0x94ebe8, "image": "https://i.imgur.com/YthmK7A.png"},
+  {"name": "Flora", "rarity": 38.8, "color": 0x94ebe8, "image": "https://i.imgur.com/YthmK7A.png"},
   {"name": "Author", "rarity": 49.8, "color": 0xeb344f, "image": "https://imgur.com/VzpQyC8.png"},
   {"name": "Branket", "rarity": 18.8, "color": 0xeb344f, "image": "https://i.imgur.com/G44H1ET.png"},
 {"name": "Baygon", "rarity": 19, "color": 0x4bf21d, "image": "https://imgur.com/fU9lCC5.png"},
@@ -26,5 +26,11 @@ OBJECTS = [
   {"name": "Stik", "rarity": 40.8, "color": 0xeb344f, "image": "https://i.imgur.com/ZBJXQwT.png"},
   {"name": "Photo Inserter", "rarity": 50.8, "color": 0xeb344f, "image": "https://i.imgur.com/aSN8ChK.png"},
   {"name": "KTP", "rarity": 40.8, "color": 0xeb344f, "image": "https://i.imgur.com/iuPveaq.png"},
+  {"name": "Lija", "rarity": 5.5555, "color": 0xeb344f, "image": "https://i.imgur.com/e758c3Z.png"},
+  {"name": "Kopi Lawak", "rarity": 15.7, "color": 0xeb344f, "image": "https://i.imgur.com/N1FrTq8.png"},
+  {"name": "Pisgor", "rarity": 28, "color": 0xeb344f, "image": "https://i.imgur.com/DgI74iU.png"},
+  {"name": "Lup", "rarity": 30, "color": 0xeb344f, "image": "https://i.imgur.com/Payatd5.png"},
+  {"name": "Planter", "rarity": 27, "color": 0xeb344f, "image": "https://i.imgur.com/JrRoKi2.png"},
+  {"name": "Rafles", "rarity": 30, "color": 0xeb344f, "image": "https://i.imgur.com/Tq09eI8.png"},
 
 ]
