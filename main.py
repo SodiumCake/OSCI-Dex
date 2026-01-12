@@ -19,8 +19,8 @@ from interactions.models.internal.localisation import LocalisedField
 from objects import OBJECTS
 import json
 
-DATA_PATH = "collections.json"
-CHANNELS_PATH = "channels.json"
+DATA_PATH = "data/collections.json"
+CHANNELS_PATH = "data/channels.json"
 
 
 # ===================== CLIENT =====================
@@ -208,8 +208,8 @@ async def spawn_object(channel, obj=None):
 
 ACTIVITY_WINDOW = 60      # detik
 ACTIVITY_THRESHOLD = 6   # minimal pesan
-MIN_COOLDOWN = 120       # 2 menit
-MAX_COOLDOWN = 240       # 4 menit
+MIN_COOLDOWN = 5       
+MAX_COOLDOWN = 30       
 
 @listen()
 async def on_message_create(event):
@@ -231,16 +231,37 @@ async def on_message_create(event):
     while activity and now - activity[0] > ACTIVITY_WINDOW:
         activity.popleft()
 
+    # hitung total aktivitas server (semua channel)
+    server_activity = 0
+    now = time.time()
+    for activity in channel_activity.values():
+        # bersihkan pesan lama di semua channel
+        while activity and now - activity[0] > ACTIVITY_WINDOW:
+            activity.popleft()
+        server_activity += len(activity)
+
     # tidak auto spawn jika channel tidak diaktifkan
     if channel_id not in auto_channels:
+        # tapi jika server ramai secara keseluruhan, coba spawn di channel yang aktif
+        if server_activity >= ACTIVITY_THRESHOLD * 2: # threshold lebih tinggi untuk global spawn
+            # Cari channel aktif yang tidak sedang dalam cooldown atau aktif spawn
+            for active_id in auto_channels:
+                if not any(v["channel_id"] == str(active_id) for v in active_spawns.values()):
+                    last_active = spawn_cooldown.get(active_id, 0)
+                    if now - last_active >= random.randint(MIN_COOLDOWN, MAX_COOLDOWN):
+                        target_channel = client.get_channel(active_id)
+                        if target_channel:
+                            await spawn_object(target_channel)
+                            spawn_cooldown[active_id] = now
+                            return
         return
 
     # sudah ada spawn aktif
     if any(v["channel_id"] == str(channel_id) for v in active_spawns.values()):
         return
 
-    # belum cukup ramai
-    if len(activity) < ACTIVITY_THRESHOLD:
+    # belum cukup ramai (cek aktivitas channel lokal ATAU server secara keseluruhan)
+    if len(activity) < ACTIVITY_THRESHOLD and server_activity < ACTIVITY_THRESHOLD * 1.5:
         return
 
     # masih cooldown
@@ -315,18 +336,7 @@ async def dex_activate(ctx: SlashContext):
 
 @dex.subcommand(sub_cmd_name="completions", sub_cmd_description="Lihat koleksi objek yang tersedia")
 async def dex_collections(ctx: SlashContext):
-    embed = Embed(
-        title="OsciDex Completions",
-        description="Daftar semua objek yang bisa kamu temukan!",
-        color=0x00FF00
-    )
-    for obj in OBJECTS:
-        embed.add_field(
-            name=obj["name"],
-            value=f"Rarity: **{obj['rarity']}**",
-            inline=True
-        )
-    await ctx.send(embeds=embed)
+    await send_paginated_embed(ctx, OBJECTS, "OsciDex Completions", "Daftar semua objek yang bisa kamu temukan!")
 
 @dex.subcommand(
     sub_cmd_name="collections",
@@ -337,34 +347,91 @@ async def dex_completions(ctx: SlashContext):
     collection = user_collections.get(user_id, [])
 
     if not collection:
-        await ctx.send(
-            "Kamu belum punya objek apa pun :/\n-# skill issue :3"
-        )
+        await ctx.send("Kamu belum punya objek apa pun :/\n-# skill issue :3")
         return
 
-    # hitung unique object
-    unique_owned = set(collection)
+    unique_owned = sorted(set(collection))
     total_objects = len(OBJECTS)
     completion_percent = (len(unique_owned) / total_objects) * 100
+    
+    # Pre-calculate counts for each name to avoid repeat .count() calls
+    items = []
+    for name in unique_owned:
+        items.append({"name": name, "count": collection.count(name)})
 
-    embed = Embed(
-        title=f"OsciDex Completion — {ctx.author.username}",
-        description=(
-            f"Progress: **{len(unique_owned)}/{total_objects}** "
-            f"({completion_percent:.1f}%)"
-        ),
-        color=0xFFD700
+    await send_paginated_embed(
+        ctx, 
+        items, 
+        f"OsciDex Completion — {ctx.author.username}", 
+        f"Progress: **{len(unique_owned)}/{total_objects}** ({completion_percent:.1f}%)",
+        is_user_collection=True
     )
 
-    for name in sorted(unique_owned):
-        count = collection.count(name)
-        embed.add_field(
-            name=name,
-            value=f"Jumlah: **{count}x**",
-            inline=True
+async def send_paginated_embed(ctx, items, title, description, is_user_collection=False, page=0):
+    chunk_size = 10
+    total_pages = (len(items) + chunk_size - 1) // chunk_size
+    
+    start = page * chunk_size
+    end = start + chunk_size
+    chunk = items[start:end]
+    
+    embed = Embed(title=title, description=description, color=0x00FF00 if not is_user_collection else 0xFFD700)
+    for item in chunk:
+        if is_user_collection:
+            embed.add_field(name=item["name"], value=f"Jumlah: **{item['count']}x**", inline=True)
+        else:
+            embed.add_field(name=item["name"], value=f"Rarity: **{item['rarity']}**", inline=True)
+            
+    embed.set_footer(text=f"Halaman {page + 1} dari {total_pages}")
+    
+    components = [
+        ActionRow(
+            Button(style=ButtonStyle.SECONDARY, label="⬅️", custom_id=f"page_prev_{page}_{'coll' if is_user_collection else 'dex'}_{ctx.author.id}"),
+            Button(style=ButtonStyle.SECONDARY, label="➡️", custom_id=f"page_next_{page}_{'coll' if is_user_collection else 'dex'}_{ctx.author.id}")
         )
+    ]
+    
+    if hasattr(ctx, "edit_origin"):
+        await ctx.edit_origin(embeds=embed, components=components)
+    else:
+        await ctx.send(embeds=embed, components=components)
 
-    await ctx.send(embeds=embed)
+@component_callback(re.compile(r"page_(prev|next)_\d+_(dex|coll)_\d+"))
+async def page_callback(ctx: ComponentContext):
+    parts = ctx.custom_id.split("_")
+    action = parts[1]
+    current_page = int(parts[2])
+    type_ = parts[3]
+    owner_id = int(parts[4])
+    
+    if ctx.author.id != owner_id:
+        await ctx.send("Hanya pengirim perintah yang bisa mengganti halaman.", ephemeral=True)
+        return
+        
+    new_page = current_page - 1 if action == "prev" else current_page + 1
+    
+    if type_ == "dex":
+        items = OBJECTS
+        title = "OsciDex Completions"
+        description = "Daftar semua objek yang bisa kamu temukan!"
+        is_user_collection = False
+    else:
+        user_id = str(owner_id)
+        collection = user_collections.get(user_id, [])
+        unique_owned = sorted(set(collection))
+        total_objects = len(OBJECTS)
+        completion_percent = (len(unique_owned) / total_objects) * 100
+        items = [{"name": name, "count": collection.count(name)} for name in unique_owned]
+        title = f"OsciDex Completion — {ctx.author.username}"
+        description = f"Progress: **{len(unique_owned)}/{total_objects}** ({completion_percent:.1f}%)"
+        is_user_collection = True
+        
+    total_pages = (len(items) + 10 - 1) // 10
+    if new_page < 0 or new_page >= total_pages:
+        await ctx.send("Sudah mencapai batas halaman.", ephemeral=True)
+        return
+        
+    await send_paginated_embed(ctx, items, title, description, is_user_collection, new_page)
 
     
 
