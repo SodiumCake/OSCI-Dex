@@ -59,7 +59,10 @@ def load_channels():
     if not os.path.exists(CHANNELS_PATH):
         return set()
     with open(CHANNELS_PATH, "r", encoding="utf-8") as f:
-        data = json.load(f)
+        content = f.read().strip()
+        if not content:
+            return set()
+        data = json.loads(content)
         return set(int(cid) for cid in data)
 
 
