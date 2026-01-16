@@ -13,7 +13,7 @@ from interactions import (
     Embed, ActionRow, Button, ButtonStyle,
     ComponentContext, component_callback,
     Modal, ShortText, modal_callback, slash_option, OptionType,
-    File,
+    File, Permissions
 )
 from interactions.models.internal.localisation import LocalisedField
 from objects import OBJECTS
@@ -21,6 +21,7 @@ import json
 
 DATA_PATH = "data/collections.json"
 CHANNELS_PATH = "data/channels.json"
+OBJECTS_PATH = "objects.py"
 
 
 # ===================== CLIENT =====================
@@ -74,6 +75,23 @@ spawn_cooldown = {}        # channel_id -> last_spawn_time
 
 
 # ===================== UTIL =====================
+
+def save_objects_to_file():
+    """
+    Menulis ulang OBJECTS ke objects.py
+    """
+    with open(OBJECTS_PATH, "w", encoding="utf-8") as f:
+        f.write("OBJECTS = [\n")
+        for obj in OBJECTS:
+            f.write("    {\n")
+            for k, v in obj.items():
+                if isinstance(v, str):
+                    f.write(f'        "{k}": "{v}",\n')
+                else:
+                    f.write(f'        "{k}": {v},\n')
+            f.write("    },\n")
+        f.write("]\n")
+
 
 def get_random_object():
     weights = [100 / o["rarity"] for o in OBJECTS]
@@ -133,11 +151,17 @@ def find_object_by_name(name: str):
 
 
 async def expire_spawn(message_id: int):
-    await asyncio.sleep(120)  # 2 menit
+    # Tunggu 5 menit (300 detik) SEBELUM mengecek apakah spawn masih aktif
+    await asyncio.sleep(300)  # 5 menit
 
-    spawn = active_spawns.pop(str(message_id), None)
+    # Cek apakah spawn masih ada di active_spawns (berarti belum ditangkap)
+    # Gunakan .get() agar tidak menghapusnya dulu, kita hanya hapus jika benar-benar expired
+    spawn = active_spawns.get(str(message_id))
     if not spawn:
         return
+
+    # Hapus dari active_spawns karena sudah expired
+    active_spawns.pop(str(message_id), None)
 
     channel = client.get_channel(int(spawn["channel_id"]))
     if not channel:
@@ -145,7 +169,9 @@ async def expire_spawn(message_id: int):
 
     try:
         msg = await channel.fetch_message(int(message_id))
-        await msg.edit(components=disabled_components())
+        # Cek apakah pesan masih punya komponen sebelum diedit
+        if msg.components:
+            await msg.edit(components=disabled_components())
     except:
         pass
 
@@ -178,25 +204,24 @@ async def spawn_object(channel, obj=None):
     )
 
 
-    components = [
-        ActionRow(
-            Button(
-                style=ButtonStyle.PRIMARY,
-                label="Catch me!",
-                custom_id=f"catch_{obj['name']}"
-            ),
-            Button(
-                style=ButtonStyle.SUCCESS,
-                label="Rarity",
-                custom_id=f"rarity_{obj['name']}"
-            )
-        )
-    ]
-
     msg = await channel.send(
         content=random.choice(CAPTIONS),
-        file=file,
-        components=components
+
+        files=[file],
+        components=[
+            ActionRow(
+                Button(
+                    style=ButtonStyle.PRIMARY,
+                    label="Catch me!",
+                    custom_id="catch_btn"
+                ),
+                Button(
+                    style=ButtonStyle.SUCCESS,
+                    label="Rarity",
+                    custom_id="rarity_btn"
+                )
+            )
+        ]
     )
 
     active_spawns[str(msg.id)] = {
@@ -234,26 +259,30 @@ async def on_message_create(event):
     while activity and now - activity[0] > ACTIVITY_WINDOW:
         activity.popleft()
 
-    # hitung total aktivitas server (semua channel)
-    server_activity = 0
-    now = time.time()
+    # bersihkan pesan lama di semua channel
     for activity in channel_activity.values():
-        # bersihkan pesan lama di semua channel
         while activity and now - activity[0] > ACTIVITY_WINDOW:
             activity.popleft()
-        server_activity += len(activity)
+
+    # Hitung total aktivitas HANYA untuk server (guild) saat ini
+    current_guild = msg.guild
+    server_activity = 0
+    if current_guild:
+        for channel in current_guild.channels:
+            if channel.id in channel_activity:
+                server_activity += len(channel_activity[channel.id])
 
     # tidak auto spawn jika channel tidak diaktifkan
     if channel_id not in auto_channels:
-        # tapi jika server ramai secara keseluruhan, coba spawn di channel yang aktif
-        if server_activity >= ACTIVITY_THRESHOLD * 2: # threshold lebih tinggi untuk global spawn
-            # Cari channel aktif yang tidak sedang dalam cooldown atau aktif spawn
+        # tapi jika server ramai secara keseluruhan, coba spawn di channel yang aktif DI SERVER INI
+        if server_activity >= ACTIVITY_THRESHOLD * 2: 
+            # Cari channel aktif DI SERVER INI yang tidak sedang dalam cooldown
             for active_id in auto_channels:
-                if not any(v["channel_id"] == str(active_id) for v in active_spawns.values()):
-                    last_active = spawn_cooldown.get(active_id, 0)
-                    if now - last_active >= random.randint(MIN_COOLDOWN, MAX_COOLDOWN):
-                        target_channel = client.get_channel(active_id)
-                        if target_channel:
+                target_channel = client.get_channel(active_id)
+                if target_channel and target_channel.guild and target_channel.guild.id == current_guild.id:
+                    if not any(v["channel_id"] == str(active_id) for v in active_spawns.values()):
+                        last_active = spawn_cooldown.get(active_id, 0)
+                        if now - last_active >= random.randint(MIN_COOLDOWN, MAX_COOLDOWN):
                             await spawn_object(target_channel)
                             spawn_cooldown[active_id] = now
                             return
@@ -275,6 +304,12 @@ async def on_message_create(event):
     # SPAWN
     await spawn_object(msg.channel)
     spawn_cooldown[channel_id] = now
+    # Hapus pesan yang men-trigger spawn untuk mencegah "Interaction already acknowledged" jika user cepat klik
+    try:
+        if msg.id:
+            pass # Kita tidak hapus pesan user, tapi kita pastikan modal dikirim dengan benar
+    except:
+        pass
 
 
 # ===================== SLASH COMMAND =====================
@@ -295,6 +330,9 @@ async def dex(ctx: SlashContext):
     autocomplete=True
 )
 async def dex_spawn(ctx: SlashContext, object: str = None):
+    # Defer interaction to avoid timeout and double response
+    await ctx.defer(ephemeral=True)
+
     if object:
         obj = find_object_by_name(object)
         if not obj:
@@ -328,7 +366,108 @@ async def dex_spawn_autocomplete(ctx: AutocompleteContext):
                 "value": obj["name"]
             })
 
-    await ctx.send(results[:25])
+    # Use try-except to handle potential interaction errors
+    try:
+        await ctx.send(results[:25])
+    except:
+        pass
+
+
+@dex.subcommand(
+    sub_cmd_name="edit",
+    sub_cmd_description="Edit object OsciDex (ADMIN ONLY)"
+)
+@slash_option(
+    name="action",
+    description="edit",
+    opt_type=OptionType.STRING,
+    required=True,
+    choices=[
+        {"name": "add", "value": "add"},
+        {"name": "remove", "value": "remove"},
+    ]
+)
+@slash_option(
+    name="object",
+    description="Nama objek",
+    opt_type=OptionType.STRING,
+    required=True
+)
+@slash_option(
+    name="rarity",
+    description="Rarity object",
+    opt_type=OptionType.NUMBER,
+    required=False
+)
+@slash_option(
+    name="color",
+    description="Warna hex",
+    opt_type=OptionType.STRING,
+    required=False
+)
+@slash_option(
+    name="image",
+    description="URL gambar",
+    opt_type=OptionType.STRING,
+    required=False
+)
+async def dex_edit(
+    ctx: SlashContext,
+    action: str,
+    object: str,
+    rarity: float = None,
+    color: str = None,
+    image: str = None,
+):
+    # ================= ADMIN CHECK =================
+    if not ctx.author.guild_permissions.ADMINISTRATOR:
+        await ctx.send("Command ini hanya untuk admin.", ephemeral=True)
+        return
+
+    action = action.lower()
+    existing = find_object_by_name(object)
+
+    # ================= ADD =================
+    if action == "add":
+        # Base data:
+        base = existing or {
+            "name": object,
+            "rarity": 50.0,
+            "color": 0xFFFFFF,
+            "image": ""
+        }
+
+        new_obj = {
+            "name": object,
+            "rarity": rarity if rarity is not None else base["rarity"],
+            "color": int(color.replace("#", ""), 16) if color else base["color"],
+            "image": image if image else base.get("image", "")
+        }
+
+        if existing:
+            OBJECTS.remove(existing)
+
+        OBJECTS.append(new_obj)
+        save_objects_to_file()
+
+        await ctx.send(
+            f"**{object}** berhasil ditambahkan!! :33",
+        )
+
+    # ================= REMOVE =================
+    elif action == "remove":
+        if not existing:
+            await ctx.send(
+                f"**{object}** tidak ditemukan.",
+            )
+            return
+
+        OBJECTS.remove(existing)
+        save_objects_to_file()
+
+        await ctx.send(
+            f"**{object}** berhasil dihapus <:yey:1345311537660825702> <:yey:1345311537660825702>",
+        )
 
 
 @dex.subcommand(sub_cmd_name="activate", sub_cmd_description="Auto spawn di channel ini")
@@ -356,7 +495,7 @@ async def dex_completions(ctx: SlashContext):
     unique_owned = sorted(set(collection))
     total_objects = len(OBJECTS)
     completion_percent = (len(unique_owned) / total_objects) * 100
-    
+
     # Pre-calculate counts for each name to avoid repeat .count() calls
     items = []
     for name in unique_owned:
@@ -373,27 +512,27 @@ async def dex_completions(ctx: SlashContext):
 async def send_paginated_embed(ctx, items, title, description, is_user_collection=False, page=0):
     chunk_size = 10
     total_pages = (len(items) + chunk_size - 1) // chunk_size
-    
+
     start = page * chunk_size
     end = start + chunk_size
     chunk = items[start:end]
-    
+
     embed = Embed(title=title, description=description, color=0x00FF00 if not is_user_collection else 0xFFD700)
     for item in chunk:
         if is_user_collection:
             embed.add_field(name=item["name"], value=f"Jumlah: **{item['count']}x**", inline=True)
         else:
             embed.add_field(name=item["name"], value=f"Rarity: **{item['rarity']}**", inline=True)
-            
+
     embed.set_footer(text=f"Halaman {page + 1} dari {total_pages}")
-    
+
     components = [
         ActionRow(
-            Button(style=ButtonStyle.SECONDARY, label="⬅️", custom_id=f"page_prev_{page}_{'coll' if is_user_collection else 'dex'}_{ctx.author.id}"),
-            Button(style=ButtonStyle.SECONDARY, label="➡️", custom_id=f"page_next_{page}_{'coll' if is_user_collection else 'dex'}_{ctx.author.id}")
+            Button(style=ButtonStyle.SECONDARY, label="**<**", custom_id=f"page_prev_{page}_{'coll' if is_user_collection else 'dex'}_{ctx.author.id}"),
+            Button(style=ButtonStyle.SECONDARY, label="**>**", custom_id=f"page_next_{page}_{'coll' if is_user_collection else 'dex'}_{ctx.author.id}")
         )
     ]
-    
+
     if hasattr(ctx, "edit_origin"):
         await ctx.edit_origin(embeds=embed, components=components)
     else:
@@ -406,13 +545,13 @@ async def page_callback(ctx: ComponentContext):
     current_page = int(parts[2])
     type_ = parts[3]
     owner_id = int(parts[4])
-    
+
     if ctx.author.id != owner_id:
         await ctx.send("Hanya pengirim perintah yang bisa mengganti halaman.", ephemeral=True)
         return
-        
+
     new_page = current_page - 1 if action == "prev" else current_page + 1
-    
+
     if type_ == "dex":
         items = OBJECTS
         title = "OsciDex Completions"
@@ -428,25 +567,27 @@ async def page_callback(ctx: ComponentContext):
         title = f"OsciDex Completion — {ctx.author.username}"
         description = f"Progress: **{len(unique_owned)}/{total_objects}** ({completion_percent:.1f}%)"
         is_user_collection = True
-        
+
     total_pages = (len(items) + 10 - 1) // 10
     if new_page < 0 or new_page >= total_pages:
         await ctx.send("Sudah mencapai batas halaman.", ephemeral=True)
         return
-        
+
     await send_paginated_embed(ctx, items, title, description, is_user_collection, new_page)
 
-    
+
 
 # ===================== BUTTONS =====================
 
-@component_callback(re.compile(r"catch_.*"))
+@component_callback("catch_btn")
 async def catch_button(ctx: ComponentContext):
     message_id = str(ctx.message.id)
+
     if message_id not in active_spawns:
-        # Jika sudah expired, update pesan untuk mendisable button
-        await ctx.edit_origin(components=disabled_components())
-        await ctx.send("Objek sudah expired.", ephemeral=True)
+        try:
+            await ctx.send("Objek sudah expired.", ephemeral=True)
+        except:
+            pass
         return
 
     modal = Modal(
@@ -457,24 +598,40 @@ async def catch_button(ctx: ComponentContext):
             required=True
         ),
         title="Catch the Object!",
-        custom_id=f"catch:{ctx.message.id}"
+        custom_id=f"catch_modal:{message_id}"
     )
-    await ctx.send_modal(modal)
 
-@component_callback(re.compile(r"rarity_.*"))
+    try:
+        await ctx.send_modal(modal)
+    except Exception as e:
+        print(f"Failed to send modal: {e}")
+
+@component_callback("rarity_btn")
 async def rarity_button(ctx: ComponentContext):
-    name = ctx.custom_id.split("_", 1)[1]
-    obj = next(o for o in OBJECTS if o["name"] == name)
-    await ctx.send(
-        f"Rarity objek ini adalah **{obj['rarity']}**, Semakin kecil angkanya semakin langka objectnya",
-        ephemeral=True
-    )
+    message_id = str(ctx.message.id)
+    spawn = active_spawns.get(message_id)
+    if not spawn:
+        try:
+            await ctx.send("Objek sudah expired.", ephemeral=True)
+        except:
+            pass
+        return
+
+    obj = spawn["object"]
+    try:
+        await ctx.send(
+            f"Rarity objek ini adalah **{obj['rarity']}**\nSemakin kecil angkanya semakin langka.",
+            ephemeral=True
+        )
+    except:
+        pass
+
 
 # ===================== MODAL =====================
 
-@modal_callback(re.compile(r"catch:\d+"))
+@modal_callback(re.compile(r"^catch_modal:\d+$"))
 async def on_modal(ctx, guess: str):
-    message_id = ctx.custom_id.split(":", 1)[1]
+    message_id = ctx.custom_id.split(":")[1]
     spawn = active_spawns.get(message_id)
 
     if not spawn:
@@ -482,34 +639,50 @@ async def on_modal(ctx, guess: str):
         return
 
     obj_name = spawn["object"]["name"]
-    obj_color = spawn["object"]["color"]
 
     if normalize_name(guess) != normalize_name(obj_name):
         await ctx.send(
-            f"<@{ctx.author.id}> salah bro. Kamu ngetik: `{guess}`"
+            f"<@{ctx.author.id}> salah bro! Kamu ngetik `{guess}`",
+            ephemeral=True
         )
         return
 
+
     user_id = str(ctx.author.id)
     object_name = spawn["object"]["name"]
+    obj_color = spawn["object"]["color"]
+
 
     add_to_collection(user_id, object_name)
 
 
-    
-    await ctx.send(
-        f"<@{ctx.author.id}> kau menangkap **{obj_name}** `(#{obj_color}, +0%/+0%)`\n\n Ini adalah **objek baru** yang ditambahkan ke koleksimu!",
-        ephemeral=False
-    )
+
+    try:
+        await ctx.send(
+            f"<@{ctx.author.id}> kau menangkap **{obj_name}** `(#{obj_color}, +0%/+0%)`\n\n Ini adalah **objek baru** yang ditambahkan ke koleksimu!",
+            ephemeral=False
+        )
+    except:
+        # Jika ctx.send gagal karena interaction expired/already acknowledged, gunakan channel.send
+        await ctx.channel.send(
+            f"<@{ctx.author.id}> kau menangkap **{obj_name}** `(#{obj_color}, +0%/+0%)`\n\n Ini adalah **objek baru** yang ditambahkan ke koleksimu!"
+        )
 
     active_spawns.pop(message_id, None)
+    
+    # Update pesan spawn untuk mendisable button setelah ditangkap
+    try:
+        spawn_msg = await ctx.channel.fetch_message(int(message_id))
+        await spawn_msg.edit(components=disabled_components())
+    except:
+        pass
 
 # ===================== READY =====================
 
 @listen()
 async def on_ready():
     print(f"OsciDex online sebagai {client.user.tag}")
-    
+
     # Debug print for auto spawn channels
     if auto_channels:
         debug_msg = "Loaded auto spawn in:\n"
@@ -526,6 +699,4 @@ async def on_ready():
         print("No auto spawn channels loaded.")
 # ===================== RUN =====================
 
-client.start(os.environ["DISCORD_TOKEN"])
-
-
+client.start("DISCORD_TOKEN")
