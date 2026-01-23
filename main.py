@@ -13,7 +13,7 @@ from interactions import (
     Embed, ActionRow, Button, ButtonStyle,
     ComponentContext, component_callback,
     Modal, ShortText, modal_callback, slash_option, OptionType,
-    File, Permissions
+    File, Permissions, StringSelectMenu, StringSelectOption
 )
 from interactions.models.internal.localisation import LocalisedField
 from objects import OBJECTS
@@ -21,7 +21,6 @@ import json
 
 DATA_PATH = "data/collections.json"
 CHANNELS_PATH = "data/channels.json"
-OBJECTS_PATH = "objects.py"
 
 
 # ===================== CLIENT =====================
@@ -53,7 +52,10 @@ def load_collections():
         return {}
 
     with open(DATA_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+        try:
+            return json.load(f)
+        except json.JSONDecodeError:
+            return {}
 
 
 def load_channels():
@@ -69,32 +71,16 @@ def load_channels():
 
 active_spawns = {}        # message_id -> data
 auto_channels = load_channels()    # channel_id auto spawn
-user_collections = load_collections()    # user_id -> list of caught objects
+user_collections = load_collections()    # user_id -> list dari objek yang tertangkap user
 channel_activity = {}      # channel_id -> deque[timestamps]
 spawn_cooldown = {}        # channel_id -> last_spawn_time
 
 
 # ===================== UTIL =====================
 
-def save_objects_to_file():
-    """
-    Menulis ulang OBJECTS ke objects.py
-    """
-    with open(OBJECTS_PATH, "w", encoding="utf-8") as f:
-        f.write("OBJECTS = [\n")
-        for obj in OBJECTS:
-            f.write("    {\n")
-            for k, v in obj.items():
-                if isinstance(v, str):
-                    f.write(f'        "{k}": "{v}",\n')
-                else:
-                    f.write(f'        "{k}": {v},\n')
-            f.write("    },\n")
-        f.write("]\n")
-
-
 def get_random_object():
-    weights = [100 / o["rarity"] for o in OBJECTS]
+    # Rarity kecil (seperti Sodium=1) sekarang benar-benar langka karena bobotnya paling kecil
+    weights = [o["rarity"] for o in OBJECTS]
     return random.choices(OBJECTS, weights=weights, k=1)[0]
 
 
@@ -179,34 +165,44 @@ async def expire_spawn(message_id: int):
 
 # ===================== SPAWN =====================
 
-async def spawn_object(channel, obj=None):
+async def spawn_object(channel, obj=None, forced_shiny=None):
     if obj is None:
         obj = get_random_object()
 
+    # tentukan status shiny: wajib jika ditentukan, jika tidak, acak 1%
+    is_shiny = forced_shiny if forced_shiny is not None else (random.random() < 0.01)
+
+    # Memakai aiohttp untuk download gambar
+    ext = "gif" if obj["image"].lower().endswith((".gif", ".gifv")) else "png"
+    
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
     }
-    async with aiohttp.ClientSession() as session:
-        async with session.get(obj["image"], headers=headers) as resp:
-            if resp.status != 200:
-                print(f"FAILED to download image from {obj['image']}. Status: {resp.status}")
-                return
-            image_bytes = await resp.read()
-            print(f"Downloaded {len(image_bytes)} bytes from {obj['image']}")
+    
+    image_bytes = None
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Imgur gifv diconvert menjadi gif untuk attachment
+            img_url = obj["image"].replace(".gifv", ".gif")
+            async with session.get(img_url, headers=headers, timeout=10) as resp:
+                if resp.status != 200:
+                    print(f"FAILED to download image from {img_url}. Status: {resp.status}")
+                    return
+                image_bytes = await resp.read()
+    except Exception as e:
+        print(f"Error downloading image: {e}")
+        return
 
     if not image_bytes:
-        print("Image bytes are empty!")
         return
 
     file = File(
         file=io.BytesIO(image_bytes),
-        file_name="object.png"
+        file_name=f"object.{ext}"
     )
 
-
     msg = await channel.send(
-        content=random.choice(CAPTIONS),
-
+        content=random.choice(CAPTIONS) + (" ✨" if is_shiny else ""),
         files=[file],
         components=[
             ActionRow(
@@ -226,7 +222,8 @@ async def spawn_object(channel, obj=None):
 
     active_spawns[str(msg.id)] = {
         "object": obj,
-        "channel_id": str(channel.id)
+        "channel_id": str(channel.id),
+        "is_shiny": is_shiny
     }
 
     asyncio.create_task(expire_spawn(msg.id))
@@ -319,6 +316,40 @@ async def dex(ctx: SlashContext):
     pass
 
 @dex.subcommand(
+    sub_cmd_name="guide",
+    sub_cmd_description="Rules dan Cara main Oscidex!"
+)
+async def info_command(ctx: SlashContext):
+    embed = Embed(
+        title="📖 OsciDex Guide",
+        description=(
+            "Selamat datang di **OsciDex**! Bot koleksi objek interaktif.\n\n"
+            "**Cara Bermain:**\n"
+            "1. **Tunggu Objek Muncul**: Objek akan muncul secara otomatis di channel yang aktif jika ada percakapan ramai.\n"
+            "2. **Tangkap Objek**: Klik tombol **Catch me!** dan ketikkan nama objek yang muncul di gambar.\n"
+            "3. **Koleksi**: Cek koleksimu dengan `/dex collections`.\n\n"
+            "**Tips:**\n"
+            "• Objek memiliki tingkat **Rarity** (angka lebih kecil = lebih langka).\n"
+            "• Ada peluang **1%** mendapatkan versi **Shiny ✨** yang langka!\n"
+            "• Objek akan expired dalam **5 menit** jika tidak ditangkap."
+        ),
+        color=0x5865F2,
+        url="http://github.com/SodiumCake/OSCI-Dex"
+    )
+    await ctx.send(
+        embeds=embed,
+        components=[
+            ActionRow(
+                Button(
+                    style=ButtonStyle.URL,
+                    label=":3",
+                    url="https://example.com"
+                )
+            )
+        ]
+    )
+
+@dex.subcommand(
     sub_cmd_name="spawn",
     sub_cmd_description="Spawn objek (random atau tertentu)"
 )
@@ -329,8 +360,19 @@ async def dex(ctx: SlashContext):
     required=False,
     autocomplete=True
 )
-async def dex_spawn(ctx: SlashContext, object: str = None):
-    # Defer interaction to avoid timeout and double response
+@slash_option(
+    name="shiny",
+    description="Paksa objek menjadi shiny?",
+    opt_type=OptionType.BOOLEAN,
+    required=False
+)
+async def dex_spawn(ctx: SlashContext, object: str = None, shiny: bool = None):
+    # ================= ADMIN CHECK =================
+    if not ctx.author.has_permission(Permissions.ADMINISTRATOR):
+        await ctx.send("Mau ngapain hayoo <:sololololo:1366327726553698304>")
+        return
+
+    # Defer interaction untuk menghindari timeout
     await ctx.defer(ephemeral=True)
 
     if object:
@@ -342,15 +384,15 @@ async def dex_spawn(ctx: SlashContext, object: str = None):
             )
             return
 
-        await spawn_object(ctx.channel, obj)
+        await spawn_object(ctx.channel, obj, forced_shiny=shiny)
         await ctx.send(
-            f"Objek **{obj['name']}** berhasil di-spawn.",
+            f"Objek **{obj['name']}**{' (Shiny ✨)' if shiny else ''} berhasil di-spawn.",
             ephemeral=True
         )
     else:
-        await spawn_object(ctx.channel)
+        await spawn_object(ctx.channel, forced_shiny=shiny)
         await ctx.send(
-            "Spawn random berhasil.",
+            f"Spawn random{' (Shiny ✨)' if shiny else ''} berhasil.",
             ephemeral=True
         )
 
@@ -366,7 +408,7 @@ async def dex_spawn_autocomplete(ctx: AutocompleteContext):
                 "value": obj["name"]
             })
 
-    # Use try-except to handle potential interaction errors
+    # pakai try-except untuk jaga jaga error autocomplete
     try:
         await ctx.send(results[:25])
     except:
@@ -374,104 +416,295 @@ async def dex_spawn_autocomplete(ctx: AutocompleteContext):
 
 
 @dex.subcommand(
+    sub_cmd_name="trade",
+    sub_cmd_description="Trade objek dengan user lain"
+)
+@slash_option(
+    name="user",
+    description="User yang ingin diajak trade",
+    opt_type=OptionType.USER,
+    required=True
+)
+@slash_option(
+    name="your_object",
+    description="Objek milikmu yang ingin ditukar",
+    opt_type=OptionType.STRING,
+    required=True,
+    autocomplete=True
+)
+@slash_option(
+    name="their_object",
+    description="Objek milik mereka yang kamu inginkan (Kosongkan jika hanya ingin memberi)",
+    opt_type=OptionType.STRING,
+    required=False,
+    autocomplete=True
+)
+async def dex_trade(ctx: SlashContext, user, your_object: str, their_object: str = None):
+    if user.id == ctx.author.id:
+        await ctx.send("Kamu tidak bisa trade dengan diri sendiri🥶")
+        return
+
+    sender_id = str(ctx.author.id)
+    receiver_id = str(user.id)
+    
+    sender_coll = user_collections.get(sender_id, [])
+    receiver_coll = user_collections.get(receiver_id, [])
+
+    if your_object not in sender_coll:
+        await ctx.send(f"Kamu tidak memiliki **{your_object}**.")
+        return
+    
+    if their_object and their_object not in receiver_coll:
+        await ctx.send(f"<@{receiver_id}> tidak memiliki **{their_object}**.")
+        return
+
+    offer_text = f"**Memberi:** {your_object}\n"
+    if their_object:
+        offer_text += f"**Menerima:** {their_object}\n\n"
+        title = "Trade Offer"
+    else:
+        offer_text += "**Menerima:** - (Gift/Pemberian)\n\n"
+        title = "Trade Offer"
+
+    embed = Embed(
+        title=title,
+        description=(
+            f"<@{sender_id}> ingin mengajak trade!\n\n"
+            f"{offer_text}"
+            f"Apakah <@{receiver_id}> setuju?"
+        ),
+        color=0xFFD700
+    )
+
+    components = [
+        ActionRow(
+            Button(
+                style=ButtonStyle.SUCCESS,
+                label="Accept",
+                custom_id=f"trade_accept_{sender_id}_{receiver_id}_{your_object}_{their_object if their_object else 'NONE'}"
+            ),
+            Button(
+                style=ButtonStyle.DANGER,
+                label="Decline",
+                custom_id=f"trade_decline_{sender_id}_{receiver_id}"
+            )
+        )
+    ]
+
+    await ctx.send(content=f"<@{receiver_id}>", embeds=embed, components=components)
+
+@component_callback(re.compile(r"trade_accept_(\d+)_(\d+)_(.+?)_(.+)"))
+async def trade_accept_callback(ctx: ComponentContext):
+    parts = ctx.custom_id.split("_")
+    sender_id = parts[2]
+    receiver_id = parts[3]
+    sender_obj = parts[4]
+    receiver_obj = parts[5] if parts[5] != "NONE" else None
+
+    if str(ctx.author.id) != receiver_id:
+        await ctx.send("Hanya penerima trade yang bisa memproses ini.", ephemeral=True)
+        return
+
+    # Re-verify coleksi (menjegah race condition)
+    sender_coll = user_collections.get(sender_id, [])
+    receiver_coll = user_collections.get(receiver_id, [])
+
+    if sender_obj not in sender_coll:
+        await ctx.edit_origin(content=f"Trade gagal karena <@{sender_id}> tidak lagi memiliki **{sender_obj}**.", embeds=[], components=[])
+        return
+        
+    if receiver_obj and receiver_obj not in receiver_coll:
+        await ctx.edit_origin(content=f"Trade gagal karena <@{receiver_id}> tidak lagi memiliki **{receiver_obj}**.", embeds=[], components=[])
+        return
+
+    # Memproses trade
+    user_collections[sender_id].remove(sender_obj)
+    if receiver_obj:
+        user_collections[sender_id].append(receiver_obj)
+        user_collections[receiver_id].remove(receiver_obj)
+    
+    user_collections[receiver_id].append(sender_obj)
+    
+    save_collections()
+
+    if receiver_obj:
+        msg = f"Trade Sukses!\n<@{sender_id}> menerima **{receiver_obj}**\n<@{receiver_id}> menerima **{sender_obj}**"
+    else:
+        msg = f"Trade Sukses!\n<@{receiver_id}> menerima **{sender_obj}** dari <@{sender_id}>"
+
+    await ctx.edit_origin(
+        content=msg,
+        embeds=[],
+        components=[]
+    )
+
+@component_callback(re.compile(r"trade_decline_(\d+)_(\d+)"))
+async def trade_decline_callback(ctx: ComponentContext):
+    parts = ctx.custom_id.split("_")
+    receiver_id = parts[3]
+
+    if str(ctx.author.id) != receiver_id:
+        await ctx.send("Hanya penerima trade yang bisa memproses ini.", ephemeral=True)
+        return
+
+    await ctx.edit_origin(content="Trade ditolak.", embeds=[], components=[])
+
+@dex_trade.autocomplete("your_object")
+@dex_trade.autocomplete("their_object")
+async def trade_autocomplete(ctx: AutocompleteContext):
+    user_input = (ctx.input_text or "").lower()
+    # menampilkan semua objek yang dimiliki uswr
+    results = []
+    # combinasi objek normal dan shiny
+    for obj in OBJECTS:
+        names = [obj["name"], f"{obj['name']} ✨"]
+        for n in names:
+            if user_input in n.lower():
+                results.append({"name": n, "value": n})
+    
+    try:
+        await ctx.send(results[:25])
+    except:
+        pass
+
+
+@dex.subcommand(
+    sub_cmd_name="wave",
+    sub_cmd_description="Spawn 3 objek sekaligus (Owner Only)"
+)
+async def dex_wave(ctx: SlashContext):
+    # Sodiums
+    if str(ctx.author.id) != "985457908961660960":
+        await ctx.send("Anak nakal <:indo_geram:1462270643436388463>")
+        return
+    await ctx.defer(ephemeral=True)
+
+    # Spawn 3 random objects
+    for i in range(3):
+        await spawn_object(ctx.channel)
+        # delay agar nggak di rate limit
+        await asyncio.sleep(0.5)
+
+    await ctx.send("Wavey wavey")
+
+
+@dex.subcommand(
     sub_cmd_name="edit",
-    sub_cmd_description="Edit object OsciDex (ADMIN ONLY)"
+    sub_cmd_description="Edit koleksi user (ADMIN ONLY)"
 )
 @slash_option(
     name="action",
-    description="edit",
+    description="Tambah atau hapus objek dari koleksi user",
     opt_type=OptionType.STRING,
     required=True,
     choices=[
         {"name": "add", "value": "add"},
         {"name": "remove", "value": "remove"},
+        {"name": "shinify", "value": "shinify"},
+        {"name": "unshinify", "value": "unshinify"},
     ]
+)
+@slash_option(
+    name="target_user",
+    description="User yang ingin diedit koleksinya",
+    opt_type=OptionType.USER,
+    required=True
 )
 @slash_option(
     name="object",
     description="Nama objek",
     opt_type=OptionType.STRING,
-    required=True
-)
-@slash_option(
-    name="rarity",
-    description="Rarity object",
-    opt_type=OptionType.NUMBER,
-    required=False
-)
-@slash_option(
-    name="color",
-    description="Warna hex",
-    opt_type=OptionType.STRING,
-    required=False
-)
-@slash_option(
-    name="image",
-    description="URL gambar",
-    opt_type=OptionType.STRING,
-    required=False
+    required=True,
+    autocomplete=True
 )
 async def dex_edit(
     ctx: SlashContext,
     action: str,
+    target_user: str,
     object: str,
-    rarity: float = None,
-    color: str = None,
-    image: str = None,
 ):
     # ================= ADMIN CHECK =================
-    if not ctx.author.guild_permissions.ADMINISTRATOR:
-        await ctx.send("Command ini hanya untuk admin.", ephemeral=True)
+    if not ctx.author.has_permission(Permissions.ADMINISTRATOR):
+        await ctx.send("Mau ngapain hayoo <:sololololo:1366327726553698304>")
         return
 
+    # target_user akan berupa objek Member/User jika OptionType.USER digunakan.
+    uid = str(target_user.id) if hasattr(target_user, "id") else str(target_user)
     action = action.lower()
-    existing = find_object_by_name(object)
+    obj = find_object_by_name(object)
+
+    if not obj:
+        await ctx.send(f"Objek `{object}` tidak ditemukan di database global.", ephemeral=True)
+        return
+
+    if uid not in user_collections:
+        user_collections[uid] = []
 
     # ================= ADD =================
     if action == "add":
-        # Base data:
-        base = existing or {
-            "name": object,
-            "rarity": 50.0,
-            "color": 0xFFFFFF,
-            "image": ""
-        }
-
-        new_obj = {
-            "name": object,
-            "rarity": rarity if rarity is not None else base["rarity"],
-            "color": int(color.replace("#", ""), 16) if color else base["color"],
-            "image": image if image else base.get("image", "")
-        }
-
-        if existing:
-            OBJECTS.remove(existing)
-
-        OBJECTS.append(new_obj)
-        save_objects_to_file()
-
+        user_collections[uid].append(obj["name"])
+        save_collections()
         await ctx.send(
-            f"**{object}** berhasil ditambahkan!! :33",
+            f"Berhasil menambahkan **{obj['name']}** ke koleksi <@{uid}> nya :3c",
         )
 
     # ================= REMOVE =================
     elif action == "remove":
-        if not existing:
+        if obj["name"] not in user_collections[uid]:
             await ctx.send(
-                f"**{object}** tidak ditemukan.",
+                f"<@{uid}> tidak memiliki **{obj['name']}** di koleksinya.",
+                ephemeral=True
             )
             return
 
-        OBJECTS.remove(existing)
-        save_objects_to_file()
+        user_collections[uid].remove(obj["name"])
+        save_collections()
 
         await ctx.send(
-            f"**{object}** berhasil dihapus <:yey:1345311537660825702> <:yey:1345311537660825702>",
+            f"Berhasil menghapus **{obj['name']}** dari koleksi <@{uid}> <:yey:1345311537660825702> <:yey:1345311537660825702> <:yey:1345311537660825702>",
         )
+
+    # ================= SHINIFY =================
+    elif action == "shinify":
+        if obj["name"] not in user_collections[uid]:
+            await ctx.send(f"<@{uid}> tidak memiliki versi biasa dari **{obj['name']}**.", ephemeral=True)
+            return
+        
+        shiny_name = f"{obj['name']} ✨"
+        user_collections[uid].remove(obj["name"])
+        user_collections[uid].append(shiny_name)
+        save_collections()
+        await ctx.send(f"Berhasil mengubah **{obj['name']}** milik <@{uid}> menjadi **Shiny** ✨!")
+
+    # ================= UNSHINIFY =================
+    elif action == "unshinify":
+        shiny_name = f"{obj['name']} ✨"
+        if shiny_name not in user_collections[uid]:
+            await ctx.send(f"<@{uid}> tidak memiliki versi **Shiny** dari **{obj['name']}**.", ephemeral=True)
+            return
+        
+        user_collections[uid].remove(shiny_name)
+        user_collections[uid].append(obj["name"])
+        save_collections()
+        await ctx.send(f"Berhasil mengubah **{obj['name']} ✨** milik <@{uid}> kembali menjadi versi biasa.")
+
+
+@dex_edit.autocomplete("object")
+async def dex_edit_autocomplete(ctx: AutocompleteContext):
+    user_input = (ctx.input_text or "").lower()
+    results = []
+    for obj in OBJECTS:
+        if user_input in obj["name"].lower():
+            results.append({"name": obj["name"], "value": obj["name"]})
+    try:
+        await ctx.send(results[:25])
+    except:
+        pass
 
 
 @dex.subcommand(sub_cmd_name="activate", sub_cmd_description="Auto spawn di channel ini")
 async def dex_activate(ctx: SlashContext):
+    await ctx.defer()
     auto_channels.add(ctx.channel.id)
     save_channels()
     await ctx.send("Auto spawn diaktifkan (1–4 menit).")
@@ -479,6 +712,122 @@ async def dex_activate(ctx: SlashContext):
 @dex.subcommand(sub_cmd_name="completions", sub_cmd_description="Lihat koleksi objek yang tersedia")
 async def dex_collections(ctx: SlashContext):
     await send_paginated_embed(ctx, OBJECTS, "OsciDex Completions", "Daftar semua objek yang bisa kamu temukan!")
+
+@dex.subcommand(
+    sub_cmd_name="list",
+    sub_cmd_description="Lihat koleksi objekmu dan tampilkan card"
+)
+@slash_option(
+    name="object",
+    description="Langsung tampilkan card untuk objek tertentu",
+    opt_type=OptionType.STRING,
+    required=False,
+    autocomplete=True
+)
+async def dex_list(ctx: SlashContext, object: str = None):
+    user_id = str(ctx.author.id)
+    collection = user_collections.get(user_id, [])
+
+    if not collection:
+        await ctx.send("Koleksimu masih kosong! Ayo tangkap objek yang muncul di channel. <:indo_cute:1366327726553698304>")
+        return
+
+    # Jika parameter object diisi, langsung tampilkan card
+    if object:
+        if object not in collection:
+            await ctx.send(f"Kamu tidak memiliki **{object}** di koleksimu.", ephemeral=True)
+            return
+            
+        clean_name = object.replace(" ✨", "")
+        obj_data = find_object_by_name(clean_name)
+        card_url = obj_data.get("card") or obj_data.get("image") if obj_data else None
+        
+        if not obj_data or not card_url:
+            await ctx.send(f"Objek **{object}** ini belum punya card.")
+            return
+
+        await ctx.defer()
+        img_url = card_url
+        file_ext = "gif" if img_url.lower().endswith(".gif") or ".gifv" in img_url.lower() else "png"
+        
+        try:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            async with aiohttp.ClientSession(headers=headers) as session:
+                async with session.get(img_url, timeout=10) as resp:
+                    if resp.status != 200:
+                        await ctx.send(f"Gagal download card (HTTP {resp.status})")
+                        return
+                    data = await resp.read()
+                    file_data = io.BytesIO(data)
+            await ctx.send(files=[File(file=file_data, file_name=f"{clean_name}.{file_ext}")])
+        except Exception as e:
+            await ctx.send(f"Error: {e}")
+        return
+
+    # Logika menu pilihan (jika parameter object kosong)
+    unique_items = sorted(list(set(collection)))
+    menu_options = [StringSelectOption(label=item, value=item) for item in unique_items[:25]]
+    select_menu = StringSelectMenu(menu_options, placeholder="Pilih objek untuk melihat card...", custom_id="dex_list_select")
+
+    await ctx.send(
+        content=f"Kamu memiliki **{len(collection)}** objek. Pilih salah satu di bawah untuk melihat card-nya:",
+        components=[ActionRow(select_menu)],
+    )
+
+@dex_list.autocomplete("object")
+async def dex_list_autocomplete(ctx: AutocompleteContext):
+    user_input = (ctx.input_text or "").lower()
+    collection = user_collections.get(str(ctx.author.id), [])
+    unique_items = sorted(list(set(collection)))
+    results = [{"name": item, "value": item} for item in unique_items if user_input in item.lower()]
+    try:
+        await ctx.send(results[:25])
+    except:
+        pass
+
+@component_callback("dex_list_select")
+async def dex_list_select_callback(ctx: ComponentContext):
+    selected_item = ctx.values[0]
+    
+    # reset nama jika shiny
+    clean_name = selected_item.replace(" ✨", "")
+    obj_data = find_object_by_name(clean_name)
+    
+    if not obj_data:
+        await ctx.send(f"Objek **{selected_item}** tidak ditemukan.")
+        return
+
+    # Prioritaskan 'card', jika tidak ada baru gunakan 'image'
+    card_url = obj_data.get("card") or obj_data.get("image")
+    
+    if not card_url:
+        await ctx.send(f"Objek **{selected_item}** ini belum punya card.")
+        return
+
+    # defer karwna download bisa lama
+    await ctx.defer()
+
+    img_url = card_url
+    file_ext = "gif" if img_url.lower().endswith(".gif") or ".gifv" in img_url.lower() else "png"
+    
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get(img_url, timeout=10) as resp:
+                if resp.status != 200:
+                    await ctx.send(f"Gagal mendownload gambar untuk **{selected_item}** (HTTP {resp.status}).\nURL: {img_url}")
+                    return
+                data = await resp.read()
+                file_data = io.BytesIO(data)
+                
+        # kirim card dari memori
+        await ctx.send(
+            files=[File(file=file_data, file_name=f"{clean_name}.{file_ext}")]
+        )
+    except Exception as e:
+        await ctx.send(f"Terjadi kesalahan saat mengirim card: {str(e)}")
 
 @dex.subcommand(
     sub_cmd_name="collections",
@@ -496,7 +845,7 @@ async def dex_completions(ctx: SlashContext):
     total_objects = len(OBJECTS)
     completion_percent = (len(unique_owned) / total_objects) * 100
 
-    # Pre-calculate counts for each name to avoid repeat .count() calls
+    # Hitung jumlah terlebih dahulu untuk setiap nama untuk menghindari .count() yang berulang.
     items = []
     for name in unique_owned:
         items.append({"name": name, "count": collection.count(name)})
@@ -528,8 +877,8 @@ async def send_paginated_embed(ctx, items, title, description, is_user_collectio
 
     components = [
         ActionRow(
-            Button(style=ButtonStyle.SECONDARY, label="**<**", custom_id=f"page_prev_{page}_{'coll' if is_user_collection else 'dex'}_{ctx.author.id}"),
-            Button(style=ButtonStyle.SECONDARY, label="**>**", custom_id=f"page_next_{page}_{'coll' if is_user_collection else 'dex'}_{ctx.author.id}")
+            Button(style=ButtonStyle.SECONDARY, label="<", custom_id=f"page_prev_{page}_{'coll' if is_user_collection else 'dex'}_{ctx.author.id}"),
+            Button(style=ButtonStyle.SECONDARY, label=">", custom_id=f"page_next_{page}_{'coll' if is_user_collection else 'dex'}_{ctx.author.id}")
         )
     ]
 
@@ -651,22 +1000,27 @@ async def on_modal(ctx, guess: str):
     user_id = str(ctx.author.id)
     object_name = spawn["object"]["name"]
     obj_color = spawn["object"]["color"]
+    is_shiny = spawn.get("is_shiny", False)
 
+    # Periksa apakah ini objek baru bagi user
+# Shiny dianggap sebagai "tipe" yang berbeda untuk tujuan pesan
+    storage_name = f"{object_name} ✨" if is_shiny else object_name
+    is_new = storage_name not in user_collections.get(user_id, [])
 
-    add_to_collection(user_id, object_name)
+    add_to_collection(user_id, storage_name)
 
+    if is_shiny:
+        status_text = "objek shiny"
+    else:
+        status_text = "objek baru" if is_new else "objek duplikat"
 
+    message_content = f"<@{ctx.author.id}> kau menangkap **{storage_name}** `(#{obj_color}, +0%/+0%)`\n\n Ini adalah **{status_text}** yang ditambahkan ke koleksimu!"
 
     try:
-        await ctx.send(
-            f"<@{ctx.author.id}> kau menangkap **{obj_name}** `(#{obj_color}, +0%/+0%)`\n\n Ini adalah **objek baru** yang ditambahkan ke koleksimu!",
-            ephemeral=False
-        )
+        await ctx.send(message_content, ephemeral=False)
     except:
         # Jika ctx.send gagal karena interaction expired/already acknowledged, gunakan channel.send
-        await ctx.channel.send(
-            f"<@{ctx.author.id}> kau menangkap **{obj_name}** `(#{obj_color}, +0%/+0%)`\n\n Ini adalah **objek baru** yang ditambahkan ke koleksimu!"
-        )
+        await ctx.channel.send(message_content)
 
     active_spawns.pop(message_id, None)
     
@@ -683,7 +1037,7 @@ async def on_modal(ctx, guess: str):
 async def on_ready():
     print(f"OsciDex online sebagai {client.user.tag}")
 
-    # Debug print for auto spawn channels
+    # print untuk auto spawn channels
     if auto_channels:
         debug_msg = "Loaded auto spawn in:\n"
         for channel_id in auto_channels:
@@ -699,4 +1053,4 @@ async def on_ready():
         print("No auto spawn channels loaded.")
 # ===================== RUN =====================
 
-client.start("DISCORD_TOKEN")
+client.start(os.getenv("DISCORD_TOKEN"))
